@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Quiz Live – Tham gia</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  .p-top { display:flex; justify-content:space-between; align-items:center; padding:12px 16px; background:rgba(0,0,0,.2); font-weight:800; }
+  .p-bottom { display:flex; justify-content:space-between; align-items:center; padding:12px 16px; background:#fff; color:var(--text); font-weight:800; }
+  .score-pill { background:#1f1235; color:#fff; padding:6px 12px; border-radius:6px; }
+  .p-question { padding:14px 16px 0; text-align:center; font-weight:800; font-size:18px; }
+  .p-timer { font-weight:900; font-size:18px; background:#fff; color:var(--bg); padding:4px 12px; border-radius:20px; min-width:52px; text-align:center; }
+  .answer-grid { flex:1; display:grid; grid-template-columns:1fr 1fr; gap:10px; padding:12px; }
+  .answer-grid.n2 { grid-template-rows:1fr; }
+  .ans-btn {
+    border:0; border-radius:8px; color:#fff; font:inherit; font-weight:800; font-size:18px;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; padding:14px;
+    box-shadow: inset 0 -6px 0 rgba(0,0,0,.25); cursor:pointer; min-height:120px; word-break:break-word;
+  }
+  .ans-btn .shape { width:44px; height:44px; }
+  .ans-btn:active { transform: translateY(2px); }
+  .ans-btn.dim { opacity:.25; }
+  .result-icon { width:96px; height:96px; border-radius:50%; background:#fff; display:grid; place-items:center; font-size:56px; font-weight:900; margin:16px auto; }
+  .res-correct { background: var(--green); }
+  .res-wrong { background: var(--red); }
+  .plus { display:inline-block; background:rgba(0,0,0,.25); padding:10px 18px; border-radius:8px; font-size:24px; font-weight:900; margin-top:8px; }
+  h1 { margin: 0 0 6px; }
+</style>
+</head>
+<body>
+
+<!-- Join -->
+<section id="s-join" class="screen center">
+  <div class="logo">Quiz<span>Live</span>!</div>
+  <form id="join-form" class="card form-card" autocomplete="off">
+    <input id="pin" class="big-input" type="text" inputmode="numeric" maxlength="6" placeholder="Mã PIN">
+    <input id="name" class="big-input" type="text" maxlength="20" placeholder="Biệt danh">
+    <button class="btn dark" type="submit">Vào game</button>
+    <div id="join-err" class="error"></div>
+  </form>
+</section>
+
+<!-- Lobby -->
+<section id="s-lobby" class="screen center hidden">
+  <h1>Bạn đã vào game!</h1>
+  <p style="font-size:20px">Tìm tên <b id="lobby-name"></b> trên màn hình nhé</p>
+  <div class="spinner"></div>
+  <p id="lobby-title" style="opacity:.8"></p>
+</section>
+
+<!-- Get ready -->
+<section id="s-ready" class="screen center hidden">
+  <h2 id="ready-label">Câu 1</h2>
+  <div class="countdown-big" id="ready-count">3</div>
+  <p>Chuẩn bị...</p>
+</section>
+
+<!-- Question -->
+<section id="s-question" class="screen hidden">
+  <div class="p-top"><span id="q-index">1 / 5</span><span class="p-timer" id="q-timer">20</span></div>
+  <div class="p-question" id="q-text"></div>
+  <div class="answer-grid" id="answer-grid"></div>
+  <div class="p-bottom"><span id="q-name"></span><span class="score-pill" id="q-score">0</span></div>
+</section>
+
+<!-- Answered -->
+<section id="s-wait" class="screen center hidden">
+  <h1>Đã ghi nhận câu trả lời!</h1>
+  <div class="spinner"></div>
+  <p>Chờ những người khác...</p>
+</section>
+
+<!-- Result -->
+<section id="s-result" class="screen center hidden">
+  <h1 id="res-title"></h1>
+  <div class="result-icon" id="res-icon"></div>
+  <div id="res-plus" class="plus"></div>
+  <p id="res-correct-text" style="margin-top:16px"></p>
+  <p id="res-rank" style="font-size:18px;font-weight:800"></p>
+</section>
+
+<!-- Final -->
+<section id="s-final" class="screen center hidden">
+  <h1>Kết thúc!</h1>
+  <p id="final-me" style="font-size:22px;font-weight:800;margin:4px 0 20px"></p>
+  <div class="board" id="final-board"></div>
+  <button class="btn light" style="margin-top:24px" onclick="location.reload()">Chơi game khác</button>
+</section>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket = io();
+const $ = (id) => document.getElementById(id);
+const screens = ['join','lobby','ready','question','wait','result','final'];
+let current = 'join';
+function show(name) { current = name; screens.forEach(s => $('s-' + s).classList.toggle('hidden', s !== name)); }
+function toast(msg) { const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg; document.body.appendChild(t); setTimeout(() => t.remove(), 3000); }
+const esc = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+let me = { name: '', score: 0 };
+let timerInt = null, clockOffset = 0, answered = false;
+
+// Prefill PIN from ?pin=
+const qp = new URLSearchParams(location.search).get('pin');
+if (qp) $('pin').value = qp;
+(qp ? $('name') : $('pin')).focus();
+
+$('join-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  $('join-err').textContent = '';
+  socket.emit('player:join', { pin: $('pin').value, name: $('name').value }, (res) => {
+    if (res.error) return $('join-err').textContent = res.error;
+    me.name = res.name;
+    $('lobby-name').textContent = res.name;
+    $('lobby-title').textContent = res.title;
+    $('q-name').textContent = res.name;
+    show('lobby');
+  });
+});
+
+socket.on('question', (q) => {
+  clearInterval(timerInt);
+  answered = false;
+  clockOffset = q.serverNow - Date.now();
+  const now = () => Date.now() + clockOffset;
+
+  $('ready-label').textContent = `Câu ${q.index + 1} / ${q.total}`;
+  $('q-index').textContent = `${q.index + 1} / ${q.total}`;
+  $('q-text').textContent = q.text;
+  $('q-score').textContent = me.score;
+  const grid = $('answer-grid');
+  grid.className = 'answer-grid' + (q.options.length === 2 ? ' n2' : '');
+  grid.innerHTML = q.options.map((o, i) =>
+    `<button class="ans-btn c${i}" data-i="${i}"><span class="shape s${i}"></span><span>${esc(o)}</span></button>`).join('');
+  grid.querySelectorAll('.ans-btn').forEach(b => b.addEventListener('click', () => answer(Number(b.dataset.i))));
+
+  show('ready');
+  const tick = () => {
+    const t = now();
+    if (t < q.startsAt) {
+      $('ready-count').textContent = Math.ceil((q.startsAt - t) / 1000);
+      return;
+    }
+    if (current === 'ready') show('question');
+    const left = Math.max(0, Math.ceil((q.startsAt + q.time * 1000 - t) / 1000));
+    $('q-timer').textContent = left;
+    if (left <= 0) {
+      clearInterval(timerInt);
+      if (!answered) { grid.querySelectorAll('.ans-btn').forEach(b => b.disabled = true); }
+    }
+  };
+  tick();
+  timerInt = setInterval(tick, 200);
+});
+
+function answer(i) {
+  if (answered) return;
+  answered = true;
+  document.querySelectorAll('.ans-btn').forEach(b => { b.disabled = true; if (Number(b.dataset.i) !== i) b.classList.add('dim'); });
+  socket.emit('player:answer', { choice: i }, (res) => {
+    if (res && res.error) { toast(res.error); return; }
+    show('wait');
+  });
+}
+
+socket.on('question:result', (r) => {
+  clearInterval(timerInt);
+  me.score = r.score;
+  const ok = r.correct;
+  const sec = $('s-result');
+  sec.classList.toggle('res-correct', ok);
+  sec.classList.toggle('res-wrong', !ok);
+  $('res-title').textContent = ok ? 'Chính xác!' : (r.answered ? 'Sai rồi!' : 'Hết giờ!');
+  $('res-icon').textContent = ok ? '✓' : '✕';
+  $('res-icon').style.color = ok ? 'var(--green)' : 'var(--red)';
+  $('res-plus').textContent = ok ? `+${r.points}` : 'Tiếp tục cố gắng nhé!';
+  $('res-correct-text').innerHTML = ok ? '' : `Đáp án đúng: <b>${esc(r.correctText)}</b>`;
+  $('res-rank').textContent = `Hạng ${r.rank} / ${r.totalPlayers} · Tổng: ${r.score} điểm`;
+  show('result');
+});
+
+socket.on('game:over', (g) => {
+  clearInterval(timerInt);
+  $('final-me').textContent = `Bạn xếp hạng ${g.rank} / ${g.totalPlayers} với ${g.score} điểm`;
+  $('final-board').innerHTML = g.top5.map((p, i) =>
+    `<div class="board-row r${p.rank} ${p.name === me.name ? 'me' : ''}" style="animation-delay:${i * .12}s">
+      <span class="rk">${p.rank}</span><span class="nm">${esc(p.name)}</span><span>${p.score}</span></div>`).join('');
+  show('final');
+});
+
+socket.on('kicked', () => { toast('Bạn đã bị mời ra khỏi game'); show('join'); });
+socket.on('game:closed', () => { toast('Host đã đóng game'); setTimeout(() => location.reload(), 1500); });
+socket.on('disconnect', () => toast('Mất kết nối tới server...'));
+</script>
+</body>
+</html>
